@@ -1,0 +1,204 @@
+<script type="text/javascript" src="https://dygraphs.com/dist/dygraph.js"></script>
+<link rel="stylesheet" type="text/css" href="https://dygraphs.com/dist/dygraph.css">
+
+<h3> this is an example of using dygraphs ..</h3>
+<br>
+<hr>
+<br>
+
+<div id="graphdiv2" style="width:700px; height:300px;"></div>
+
+<hr>
+
+<div id="status">Loading…</div>
+<hr>
+<div id="graph" style="width:700px; height:300px;"></div>
+
+
+<script type="text/javascript">
+Dygraph.onDOMready(function onDOMready() {
+  g2 = new Dygraph(
+       document.getElementById("graphdiv2"),
+// data
+            [
+                [1,10,100],
+                [2,20,80],
+                [3,50,60],
+                [4,70,80]
+              ],
+//options
+              {
+                labels: [ "x", "A", "B" ],
+                rollPeriod: 7,
+                showRoller: true,
+              }
+
+
+// or path to CSV file
+//    {
+//      axis: {
+//             x: {
+//                valueFormatter: Dygraph.dateString,
+//                valueParser: function(x) { return 1.*parseInt(x); },
+//                ticker: Dygraph.dateTicker
+//                }
+//            }
+//     }                	            // options
+  );
+});
+</script>
+
+<script>
+
+// ---- Config ----------------------------------------------------------
+//const ENDPOINT = "https://YOUR_API_HOST/graphql"; // <-- set this
+//const TOKEN    = "YOUR_TOKEN";                    // <-- set this
+const ENDPOINT = "https://makesense.senseability.uk/api/graphql/";
+const TOKEN    = "3ba7367858a95381a1223cf3fd7be30f341549e5";
+
+const end = new Date();
+const start = new Date(end.getTime() - 10*24*60*60*1000);
+
+//const todayStr = new Date();
+const startISO = start.toISOString().replace("T", " ").slice(0, 19) + "Z";
+//const endISO   = (end === start) ? toMinuteISO(new Date()) : `${end}T00:00`;
+const endISO   = end.toISOString().replace("T", " ").slice(0, 19) + "Z";
+
+const query = `
+      query {
+        device(deviceId: "0dd44407-1cef-46e2-8165-6589351e067e") {
+          history(
+            fields: ["WATER_DEPTH"],
+            timerangestart: "${startISO}",
+            timerangeend: "${endISO}",
+            resolution: "15 minutes",
+          )
+        }
+      }
+    `;
+
+//            timerangestart: "${startISO}",
+//            timerangeend: "${endISO}",
+
+// ---- GraphQL fetch ---------------------------------------------------
+    async function fetchGraphQL(query) {
+      try {
+        const response = await fetch(ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Token ${TOKEN}`
+          },
+          body: JSON.stringify({ query })
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.errors) {
+          throw new Error(`GraphQL error: ${JSON.stringify(result.errors)}`);
+        }
+
+        return result.data;
+      } catch (error) {
+        console.error("Error fetching GraphQL data:", error);
+        return { error: error.message };
+      }
+    }
+
+// ---- Render ----------------------------------------------------------
+    function renderWaterDepth(rawHistory) {
+      // `history` comes back as a JSON *string* — parse it.
+      // (If a future API returns an array directly, handle both.)
+      const history = typeof rawHistory === "string"
+        ? JSON.parse(rawHistory)
+        : rawHistory;
+
+      if (!Array.isArray(history) || history.length === 0) {
+        throw new Error("No history data returned.");
+      }
+
+      // Dygraphs native format: [[Date, value], ...]
+      const data = history.map(pt => [
+        new Date(pt.time),
+        pt.WATER_DEPTH
+      ]);
+
+//
+
+  //g2 = new Dygraph(
+  //     document.getElementById("graphdiv2"),
+
+//
+
+      const graphEl = document.getElementById("graph");
+
+      Dygraph.onDOMready(function onDOMready() {
+       g4 = new Dygraph(
+        graphEl, 
+        data, 
+        {
+          labels: ["Date", "Water Depth (m)"],
+          title: `${startISO}`+`${endISO}`,
+          xlabel: "Date",
+          ylabel: "Depth (m)",
+          legend: "always",
+          labelsUTC: true,                 // timestamps are Z / UTC
+          drawPoints: false,
+          strokeWidth: 1.5,
+          //connectSeparatedPoints: true,
+          //showRangeSelector: true,
+          //rangeSelectorHeight: 40,
+          rollPeriod: 1,
+          showRoller: true,
+
+        // Nice-to-have formatting:
+          axes: {
+          //  y: {
+          //    valueFormatter: v => v.toFixed(2) + " m",
+          //    axisLabelFormatter: v => v.toFixed(0)
+          //     },
+          //  x: {
+          //     valueFormatter: d =>
+          //     d.toISOString().replace("T", " ").slice(0, 6) + "Z",
+          //     axisLabelFormatter: d => Dygraph.dateString_(d, false)
+          //     },
+        }
+      })
+    });
+
+       document.getElementById("status").textContent =
+        `Loaded ${history.length} points ` +
+        `(${history[0].time} → ${history[history.length - 1].time})`;
+    }
+
+    // ---- Boot ------------------------------------------------------------
+    (async () => {
+      const statusEl = document.getElementById("status");
+      const data = await fetchGraphQL(query);
+
+      if (data.error) {
+        statusEl.textContent = "Error: " + data.error;
+        statusEl.style.color = "crimson";
+        return;
+      }
+
+      const rawHistory = data?.device?.history;
+      if (!rawHistory) {
+        statusEl.textContent = "No history field in response.";
+        statusEl.style.color = "crimson";
+        return;
+      }
+
+      try {
+        renderWaterDepth(rawHistory);
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Render error: " + err.message;
+        statusEl.style.color = "crimson";
+      }
+    })();
+  </script>
