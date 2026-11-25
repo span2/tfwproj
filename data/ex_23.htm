@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Water Depth – Multi-Station</title>
+  <script src="https://cdn.jsdelivr.net/npm/dygraphs@2.2.1/dist/dygraph.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/dygraphs@2.2.1/dist/dygraph.min.css">
+  <style>
+    #graphWrap { position: relative; }
+    #graph     { width: 100%; height: 520px; }
+    #status    { font-family: monospace; margin: 8px 0; }
+    #controls {
+      font-family: system-ui, sans-serif;
+      margin: 8px 0;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    #controls label { font-size: 14px; }
+    #autoInfo { font-size: 12px; color: #666; }
+
+    /* Floating cursor tooltip */
+    #cursorTip {
+      position: absolute;
+      pointer-events: none;
+      z-index: 10;
+      background: rgba(20, 20, 20, 0.88);
+      color: #fff;
+      font: 11px/1.35 monospace;
+      padding: 5px 7px;
+      border-radius: 4px;
+      white-space: pre;
+      display: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+    #cursorTip .t { color: #bbb; }
+    #cursorTip .a { color: #7fb3ff; }
+    #cursorTip .b { color: #ff8a8a; }
+    #cursorTip .c { color: #8fe08f; }
+
+    /* Depth label pinned to right edge of the horizontal crosshair */
+    #depthLabel {
+      position: absolute;
+      pointer-events: none;
+      z-index: 10;
+      background: rgba(20, 20, 20, 0.88);
+      color: #fff;
+      font: 11px/1 monospace;
+      padding: 3px 6px;
+      border-radius: 3px;
+      display: none;
+      transform: translateY(-50%);
+    }
+
+    .dygraph-annotation {
+      background: rgba(255,255,255,0.92);
+      border: 1px solid #999;
+      border-radius: 3px;
+      padding: 2px 5px;
+      font: 11px/1.3 monospace;
+      color: #222;
+      cursor: pointer;
+    }
+    .dygraph-annotation:hover { background: #ffe; }
+  </style>
+</head>
+<body>
+  <!-- ================= CONTROLS ================= -->
+  <div id="controls">
+    <label>From <input type="date" id="fromDate"></label>
+    <label>To&nbsp;&nbsp; <input type="date" id="toDate"></label>
+    <label>Resolution
+      <select id="resolution">
+        <option value="5 minutes">5 minutes</option>
+        <option value="15 minutes">15 minutes</option>
+        <option value="30 minutes" selected>30 minutes</option>
+        <option value="1 hour">1 hour</option>
+        <option value="3 hours">3 hours</option>
+        <option value="6 hours">6 hours</option>
+        <option value="12 hours">12 hours</option>
+        <option value="1 day">1 day</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="showPoints" checked> Show points</label>
+    <label><input type="checkbox" id="showValueLabels"> Value labels</label>
+    <label><input type="checkbox" id="autoReload"> Auto-reload</label>
+    <label>every
+      <select id="autoInterval">
+        <option value="15000">15 s</option>
+        <option value="30000">30 s</option>
+        <option value="60000" selected>1 min</option>
+        <option value="300000">5 min</option>
+        <option value="900000">15 min</option>
+      </select>
+    </label>
+    <button id="reloadBtn">Reload</button>
+    <button id="clearAnnotBtn">Clear labels</button>
+    <span id="status">Loading…</span>
+    <span id="autoInfo"></span>
+  </div>
+
+  <!-- ================= CHART + TOOLTIP + DEPTH LABEL ================= -->
+  <div id="graphWrap">
+    <div id="graph"></div>
+    <div id="cursorTip"></div>
+    <div id="depthLabel"></div>
+  </div>
+
+  <script>
+    // =====================================================================
+    // CONFIG
+    // =====================================================================
+    const ENDPOINT = "https://makesense.senseability.uk/api/graphql/";
+    const TOKEN    = "3ba7367858a95381a1223cf3fd7be30f341549e5";
+    const DEVICES  = [
+      { alias: "WSL1", id: "e3696f70-5452-4acf-b70a-6413fd909d03", label: "WSL1", color: "#d62728" },
+      { alias: "WSL2", id: "0dd44407-1cef-46e2-8165-6589351e067e", label: "WSL2", color: "#1f77b4" },
+      { alias: "WSL3", id: "286134ad-594e-4290-bb05-f0bf331e2ba7", label: "WSL3", color: "#2ca02c" },
+    ];
+
+
+    // =====================================================================
+    // DATE HELPERS
+    // =====================================================================
+    const toDateInputValue = d => {
+      const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,"0"),
+            dd = String(d.getDate()).padStart(2,"0");
+      return `${y}-${m}-${dd}`;
+    };
+    const toMinuteISO = d => {
+      const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,"0"),
+            dd = String(d.getDate()).padStart(2,"0"),
+            hh = String(d.getHours()).padStart(2,"0"),
+            mm = String(d.getMinutes()).padStart(2,"0");
+      return `${y}-${m}-${dd}T${hh}:${mm}`;
+    };
+    const fmtTime = d => d.toISOString().replace("T"," ").slice(0,16) + "Z";
+
+    // =====================================================================
+    // QUERY + FETCH
+    // =====================================================================
+    function buildQuery(startISO, endISO, resolution) {
+      return `
+        query {
+          ${DEVICES.map(d => `
+            ${d.alias}: device(deviceId: "${d.id}") {
+              history(
+                fields: ["WATER_DEPTH"],
+                timerangestart: "${startISO}",
+                timerangeend: "${endISO}",
+                resolution: "${resolution}"
+              )
+            }
+          `).join("\n")}
+        }
+      `;
+    }
+
+    async function fetchGraphQL(query) {
+      try {
+        const r = await fetch(ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Token ${TOKEN}` },
+          body: JSON.stringify({ query }),
+        });
+        if (!r.ok) throw new Error(`HTTP error! Status: ${r.status}`);
+        const j = await r.json();
+        if (j.errors) throw new Error(`GraphQL error: ${JSON.stringify(j.errors)}`);
+        return j.data;
+      } catch (e) {
+        console.error("Error fetching GraphQL data:", e);
+        return { error: e.message };
+      }
+    }
+
+    // =====================================================================
+    // MERGE
+    // =====================================================================
+    function mergeStations(deviceData) {
+      const byTime = new Map();
+      for (const dev of DEVICES) {
+        const raw = deviceData?.[dev.alias]?.history;
+        if (!raw) continue;
+        const h = typeof raw === "string" ? JSON.parse(raw) : raw;
+        for (const pt of h) {
+          const key = new Date(pt.time).toISOString();
+          const row = byTime.get(key) || { __t: key };
+          row[dev.alias] = pt.WATER_DEPTH;
+          byTime.set(key, row);
+        }
+      }
+      return [...byTime.values()]
+        .sort((a,b) => a.__t.localeCompare(b.__t))
+        .map(r => [new Date(r.__t), ...DEVICES.map(d => r[d.alias] ?? null)]);
+    }
+
+    // =====================================================================
+    // STATE
+    // =====================================================================
+    const annotations = [];
+    let currentData = null, currentFrom = null, currentTo = null, currentRes = null;
+    let graph = null;
+    let cursorX = null;       // pixel x inside plot area, null = not hovering
+    let cursorY = null;       // pixel y inside plot area (snapped), null = none
+
+    // Binary search: index of row nearest to xMs
+    function nearestRowIndex(rows, xMs) {
+      let lo = 0, hi = rows.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (rows[mid][0].getTime() < xMs) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0) {
+        const dPrev = Math.abs(rows[lo-1][0].getTime() - xMs);
+        const dCur  = Math.abs(rows[lo][0].getTime()   - xMs);
+        if (dPrev < dCur) lo -= 1;
+      }
+      return lo;
+    }
+
+    // =====================================================================
+    // ANNOTATIONS
+    // =====================================================================
+    function rebuildAnnotations() {
+      const timeSet = new Set((currentData || []).map(r => r[0].toISOString()));
+      return annotations.filter(a => timeSet.has(a.x));
+    }
+
+    function makeValueAnnotations(rows) {
+      if (!document.getElementById("showValueLabels").checked || rows.length === 0) return [];
+      const max = 40;
+      const stride = Math.max(1, Math.ceil(rows.length / max));
+      const out = [];
+      for (let i = 0; i < rows.length; i += stride) {
+        const row = rows[i], xISO = row[0].toISOString();
+        DEVICES.forEach((dev, idx) => {
+          const v = row[idx+1];
+          if (v == null) return;
+          out.push({ series: dev.label, x: xISO, shortText: v.toFixed(1), cssClass: "dygraph-annotation" });
+        });
+      }
+      return out;
+    }
+
+    // =====================================================================
+    // CROSSHAIR (vertical + horizontal) + TOOLTIPS
+    // =====================================================================
+    function drawCrosshair(ctx, area, xPx, yPx) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+
+      // Vertical line at cursor x
+      if (xPx != null) {
+        ctx.beginPath();
+        ctx.moveTo(xPx + 0.5, area.y);
+        ctx.lineTo(xPx + 0.5, area.y + area.h);
+        ctx.stroke();
+      }
+
+      // Horizontal line at snapped y (water-depth value)
+      if (yPx != null) {
+        ctx.beginPath();
+        ctx.moveTo(area.x, yPx + 0.5);
+        ctx.lineTo(area.x + area.w, yPx + 0.5);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    // Given cursor x inside plot, return the pixel y of the *highest*
+    // non-null station at that timestamp — that's the water-depth level
+    // we snap the horizontal crosshair to.
+    function snapYForCursor(graphInstance, xPx) {
+      if (!currentData || currentData.length === 0) return null;
+      const area = graphInstance.getArea();
+      const xMs  = graphInstance.toDataXCoord(xPx);
+      const i    = nearestRowIndex(currentData, xMs);
+      const row  = currentData[i];
+      if (!row) return null;
+
+      // Pick the max depth across stations at this timestamp
+      let best = null;
+      for (let k = 1; k < row.length; k++) {
+        const v = row[k];
+        if (v == null) continue;
+        if (best == null || v > best) best = v;
+      }
+      if (best == null) return null;
+
+      const yData = best;
+      const yPx   = graphInstance.toDomYCoord(yData);
+      // toDomYCoord returns canvas-relative y; plot area starts at area.y
+      // We want a pixel *inside* the canvas already, so just return it.
+      if (yPx < area.y || yPx > area.y + area.h) return null;
+      return { yPx, yData };
+    }
+
+    function updateCursorTip(graphInstance, xPx, clientX, clientY) {
+      const tip  = document.getElementById("cursorTip");
+      const wrap = document.getElementById("graphWrap");
+
+      if (xPx == null || !currentData || currentData.length === 0) {
+        tip.style.display = "none";
+        return;
+      }
+
+      const xMs = graphInstance.toDataXCoord(xPx);
+      const i   = nearestRowIndex(currentData, xMs);
+      const row = currentData[i];
+      if (!row) { tip.style.display = "none"; return; }
+
+      const timeStr = fmtTime(row[0]);
+      let html = `<span class="t">${timeStr}</span>`;
+      DEVICES.forEach((dev, idx) => {
+        const v = row[idx + 1];
+        const val = (v == null) ? "—" : v.toFixed(2) + " m";
+        html += `\n<span class="${dev.cls}">${dev.label}</span>: ${val}`;
+      });
+      tip.innerHTML = html;
+      tip.style.display = "block";
+
+      const wrapRect = wrap.getBoundingClientRect();
+      const tipRect  = tip.getBoundingClientRect();
+      let left = clientX - wrapRect.left + 14;
+      let top  = clientY - wrapRect.top  - tipRect.height - 10;
+      if (left + tipRect.width > wrapRect.width - 6) {
+        left = clientX - wrapRect.left - tipRect.width - 14;
+      }
+      if (top < 0) top = clientY - wrapRect.top + 14;
+      tip.style.left = left + "px";
+      tip.style.top  = top  + "px";
+    }
+
+    function updateDepthLabel(graphInstance, yPx, yData) {
+      const label = document.getElementById("depthLabel");
+      const wrap  = document.getElementById("graphWrap");
+      if (yPx == null || yData == null) {
+        label.style.display = "none";
+        return;
+      }
+      label.textContent = yData.toFixed(2) + " m";
+      label.style.display = "block";
+
+      const area   = graphInstance.getArea();
+      const canvas = graphInstance.canvas_;
+      const cRect  = canvas.getBoundingClientRect();
+      const wRect  = wrap.getBoundingClientRect();
+
+      // Place at the right edge of the plot area, vertically centered
+      // on the horizontal crosshair line.
+      const left = (cRect.left - wRect.left) + area.x + area.w - 6 - label.offsetWidth;
+      const top  = (cRect.top  - wRect.top ) + yPx;
+      label.style.left = left + "px";
+      label.style.top  = top  + "px";
+    }
+
+    function attachCursorHandlers(graphInstance) {
+      const wrap  = document.getElementById("graphWrap");
+      const tip   = document.getElementById("cursorTip");
+      const label = document.getElementById("depthLabel");
+
+      const onMove = (evt) => {
+        const area = graphInstance.getArea();
+        const rect = graphInstance.canvas_.getBoundingClientRect();
+        const xPx  = evt.clientX - rect.left;
+        const yPxRaw = evt.clientY - rect.top;
+
+        // Outside plot area → clear
+        if (xPx < area.x || xPx > area.x + area.w ||
+            yPxRaw < area.y || yPxRaw > area.y + area.h) {
+          cursorX = null; cursorY = null;
+          tip.style.display = "none";
+          label.style.display = "none";
+          graphInstance.updateOptions({});
+          return;
+        }
+
+        cursorX = xPx;
+
+        // Snap horizontal line to the nearest station value at this x
+        const snap = snapYForCursor(graphInstance, xPx);
+        cursorY = snap ? snap.yPx : null;
+
+        graphInstance.updateOptions({});   // redraw with crosshair
+        updateCursorTip(graphInstance, xPx, evt.clientX, evt.clientY);
+        if (snap) updateDepthLabel(graphInstance, snap.yPx, snap.yData);
+        else      label.style.display = "none";
+      };
+
+      const onLeave = () => {
+        cursorX = null; cursorY = null;
+        tip.style.display = "none";
+        label.style.display = "none";
+        graphInstance.updateOptions({});
+      };
+
+      wrap.addEventListener("mousemove", onMove);
+      wrap.addEventListener("mouseleave", onLeave);
+    }
+
+    // =====================================================================
+    // RENDER
+    // =====================================================================
+    function renderStations(rows, fromDate, toDate, resolution) {
+      if (rows.length === 0) throw new Error("No data returned for any station in this range.");
+
+      currentData = rows;
+      currentFrom = fromDate;
+      currentTo   = toDate;
+      currentRes  = resolution;
+
+      if (graph) { graph.destroy(); graph = null; }
+
+      const showPoints = document.getElementById("showPoints").checked;
+      const userAnnots = rebuildAnnotations();
+      const autoAnnots = makeValueAnnotations(rows);
+
+      graph = new Dygraph(document.getElementById("graph"), rows, {
+        labels: ["Time", ...DEVICES.map(d => d.label)],
+        title: `Water Depth – ${fromDate} → ${toDate} @ ${resolution}`,
+        xlabel: "Time",
+        ylabel: "Depth (m)",
+        legend: "always",
+        labelsUTC: true,
+
+        drawPoints: showPoints,
+        pointSize: 3,
+        highlightCircleSize: 5,
+        highlightSeriesOpts: { strokeWidth: 3, strokePattern: null, highlightCircleSize: 6 },
+
+        annotations: [...userAnnots, ...autoAnnots],
+        annotationClickHandler: (ann) => {
+          const i = annotations.findIndex(a => a.series === ann.series && a.x === ann.x);
+          if (i >= 0) {
+            annotations.splice(i, 1);
+            renderStations(currentData, currentFrom, currentTo, currentRes);
+          }
+        },
+        pointClickCallback: (e, pt) => {
+          const xISO = new Date(pt.xval).toISOString();
+          const seriesLabel = graph.getLabels()[pt.name];
+          const v = pt.yval;
+          const existing = annotations.findIndex(a => a.series === seriesLabel && a.x === xISO);
+          if (existing >= 0) annotations.splice(existing, 1);
+          else annotations.push({
+            series: seriesLabel, x: xISO, shortText: v.toFixed(2),
+            cssClass: "dygraph-annotation", text: `${seriesLabel}: ${v.toFixed(2)} m`,
+          });
+          renderStations(currentData, currentFrom, currentTo, currentRes);
+        },
+
+        showRangeSelector: true,
+        rangeSelectorHeight: 40,
+        colors: DEVICES.map(d => d.color),
+        dateWindow: [
+          new Date(`${fromDate}T00:00:00Z`),
+          new Date(`${toDate}T23:59:59Z`),
+        ],
+        axes: {
+          y: { valueFormatter: v => v.toFixed(2) + " m", axisLabelFormatter: v => v.toFixed(0) },
+          x: { valueFormatter: fmtTime, axisLabelFormatter: d => Dygraph.dateString_(d, false) },
+        },
+
+        // Draw both crosshair lines (vertical + horizontal)
+        drawCallback: (g, isInitial) => {
+          if (isInitial) return;
+          if (cursorX == null && cursorY == null) return;
+          const area = g.getArea();
+          if (area.w <= 0) return;
+          drawCrosshair(g.canvas_ctx_, area, cursorX, cursorY);
+        },
+      });
+
+      attachCursorHandlers(graph);
+
+      const summary = DEVICES.map(d => d.label).join(" · ");
+      document.getElementById("status").textContent =
+        `[${new Date().toLocaleTimeString()}] ${rows.length} timestamps @ ${resolution} — ${summary}` +
+        (userAnnots.length ? `  ·  ${userAnnots.length} pinned` : "");
+    }
+
+    // =====================================================================
+    // MAIN LOADER
+    // =====================================================================
+    let loading = false;
+    async function load() {
+      if (loading) return;
+      loading = true;
+
+      const statusEl   = document.getElementById("status");
+      const fromDate   = document.getElementById("fromDate").value;
+      const toDate     = document.getElementById("toDate").value;
+      const resolution = document.getElementById("resolution").value;
+
+      try {
+        if (!fromDate || !toDate) { statusEl.textContent = "Please pick both dates."; statusEl.style.color = "crimson"; return; }
+        if (fromDate > toDate)    { statusEl.textContent = "'From' must be on or before 'To'."; statusEl.style.color = "crimson"; return; }
+        if (!resolution)          { statusEl.textContent = "Please pick a resolution."; statusEl.style.color = "crimson"; return; }
+
+        const todayStr = toDateInputValue(new Date());
+        const startISO = `${fromDate}T00:00`;
+        const endISO   = (toDate === todayStr) ? toMinuteISO(new Date()) : `${toDate}T00:00`;
+
+        statusEl.textContent = "Loading…";
+        statusEl.style.color = "";
+
+        const data = await fetchGraphQL(buildQuery(startISO, endISO, resolution));
+        if (data.error) { statusEl.textContent = "Error: " + data.error; statusEl.style.color = "crimson"; return; }
+
+        const rows = mergeStations(data);
+        renderStations(rows, fromDate, toDate, resolution);
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Render error: " + err.message;
+        statusEl.style.color = "crimson";
+      } finally {
+        loading = false;
+      }
+    }
+
+    // =====================================================================
+    // AUTO-RELOAD
+    // =====================================================================
+    let autoTimer = null, autoCountdownTimer = null;
+    function stopAutoReload() {
+      if (autoTimer)          { clearInterval(autoTimer);          autoTimer = null; }
+      if (autoCountdownTimer) { clearInterval(autoCountdownTimer); autoCountdownTimer = null; }
+      document.getElementById("autoInfo").textContent = "";
+    }
+    function startAutoReload(intervalMs) {
+      stopAutoReload();
+      if (!intervalMs || intervalMs <= 0) return;
+      let nextAt = Date.now() + intervalMs;
+      autoTimer = setInterval(() => { nextAt = Date.now() + intervalMs; load(); }, intervalMs);
+      const infoEl = document.getElementById("autoInfo");
+      autoCountdownTimer = setInterval(() => {
+        infoEl.textContent = `(next in ${Math.max(0, Math.round((nextAt - Date.now())/1000))}s)`;
+      }, 1000);
+      infoEl.textContent = `(next in ${Math.round(intervalMs/1000)}s)`;
+    }
+    function refreshAutoReload() {
+      const enabled  = document.getElementById("autoReload").checked;
+      const interval = parseInt(document.getElementById("autoInterval").value, 10);
+      if (enabled) startAutoReload(interval); else stopAutoReload();
+    }
+
+    // =====================================================================
+    // DEBOUNCED CHANGE HANDLER
+    // =====================================================================
+    let changeDebounce = null;
+    function scheduleReload() {
+      clearTimeout(changeDebounce);
+      changeDebounce = setTimeout(() => {
+        if (document.getElementById("autoReload").checked) refreshAutoReload();
+        load();
+      }, 300);
+    }
+
+    // =====================================================================
+    // WIRING
+    // =====================================================================
+    document.getElementById("reloadBtn").addEventListener("click", load);
+    document.getElementById("fromDate").addEventListener("change", scheduleReload);
+    document.getElementById("toDate").addEventListener("change", scheduleReload);
+    document.getElementById("resolution").addEventListener("change", scheduleReload);
+    document.getElementById("showPoints").addEventListener("change", () => {
+      if (currentData) renderStations(currentData, currentFrom, currentTo, currentRes);
+    });
+    document.getElementById("showValueLabels").addEventListener("change", () => {
+      if (currentData) renderStations(currentData, currentFrom, currentTo, currentRes);
+    });
+    document.getElementById("autoReload").addEventListener("change", () => {
+      refreshAutoReload();
+      if (document.getElementById("autoReload").checked) load();
+    });
+    document.getElementById("autoInterval").addEventListener("change", refreshAutoReload);
+    document.getElementById("clearAnnotBtn").addEventListener("click", () => {
+      annotations.length = 0;
+      if (currentData) renderStations(currentData, currentFrom, currentTo, currentRes);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopAutoReload();
+      else { refreshAutoReload(); if (document.getElementById("autoReload").checked) load(); }
+    });
+
+    // =====================================================================
+    // INITIAL DEFAULTS: last 2 days → now
+    // =====================================================================
+    (function initDateDefaults() {
+      const now = new Date();
+      const twoDaysAgo = new Date(now.getTime() - 2*24*60*60*1000);
+      document.getElementById("fromDate").value = toDateInputValue(twoDaysAgo);
+      document.getElementById("toDate").value   = toDateInputValue(now);
+    })();
+
+    load();
+  </script>
+</body>
+</html>
