@@ -1,0 +1,47 @@
+<html style="color-scheme: dark">
+  <!-- docker -->
+  <head>
+    <meta charset="utf-8">
+	<meta charset="utf-8">
+    <meta name="description" content="JSFiddle - Test your React, Tailwind, JavaScript, CSS, HTML online with JSFiddle.">
+    <meta name="keywords" content="online javascript editor, testing javascript online, online ide, online code editor, html, css, react, tailwind online editor">
+    <meta name="author" content="JSFiddle">
+    <meta name="copyright" content="share alike">
+    <meta name="ipc" content="">
+  </head>
+
+<link rel="stylesheet" href="https://dygraphs.com/dist/dygraph.css">
+<script src="https://dygraphs.com/gallery/data.js"></script>
+<script src="https://dygraphs.com/dist/dygraph.js"></script>
+<div id="div_g" style="width:600px; height:300px;"></div>
+<p>This test is modeled after a 
+<a href="http://www.highcharts.com/demo/?example=dynamic-update&amp;theme=default">highcharts
+test</a>. New points should appear once per second. Try zooming and 
+panning over to the right edge to watch them show up.</p>
+
+<script>
+ $(document).ready(function() {
+      var data = [];
+      var t = new Date();
+      for (var i = 10; i >= 0; i--) {
+        var x = new Date(t.getTime() - i * 1000);
+        data.push([x, Math.random()]);
+      }
+
+      var g = new Dygraph(document.getElementById("div_g"), data,
+                          {
+                            drawPoints: true,
+                            showRoller: true,
+                            valueRange: [0.0, 1.2],
+                            labels: ['Time', 'Random']
+                          });
+      // It sucks that these things aren't objects, and we need to store state in window.
+      window.intervalId = setInterval(function() {
+        var x = new Date();  // current time
+        var y = Math.random();
+        data.push([x, y]);
+        g.updateOptions( { 'file': data } );
+      }, 1000);
+    }
+);
+</script>
